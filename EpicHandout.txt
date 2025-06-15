@@ -1,0 +1,138 @@
+import logging
+import requests
+import json
+import os
+import asyncio
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from apscheduler.schedulers.background import BackgroundScheduler
+from bs4 import BeautifulSoup
+
+BOT_TOKEN = '7601351287:AAFj1MtZPmXPPnpaaRry-a2BgNpUfZ6KDrw'  # 🔁 Вставь свой токен
+USER_ID = 1878738169# 🔁 Вставь свой Telegram ID
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Загружаем список отправленных игр
+def load_sent_games():
+    if os.path.exists("sent_games.json"):
+        with open("sent_games.json", "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+# Сохраняем список отправленных игр
+def save_sent_games(games):
+    with open("sent_games.json", "w", encoding="utf-8") as f:
+        json.dump(list(games), f, ensure_ascii=False, indent=2)
+
+# Получаем список бесплатных игр из Epic Store
+def get_free_epic_games():
+    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
+    params = {
+        "locale": "en-US",
+        "country": "US",
+        "allowCountries": "US"
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    games = []
+    for game in data['data']['Catalog']['searchStore']['elements']:
+        if game['promotions'] and game['promotions']['promotionalOffers']:
+            title = game['title']
+            slug = game.get('productSlug') or game['catalogNs']['mappings'][0]['pageSlug']
+            game_url = f"https://store.epicgames.com/p/{slug}"
+            games.append(f"🎮 {title}\n{game_url}")
+    return games
+
+# Получаем список бесплатных игр из Steam (100% скидка)
+def get_steam_free_games():
+    url = "https://steamdb.info/upcoming/free/"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    games = []
+    rows = soup.select("table.table-products tbody tr")
+
+    for row in rows:
+        cols = row.find_all("td")
+        if not cols:
+            continue
+
+        title_col = cols[0]
+        title = title_col.text.strip()
+        link = "https://steamdb.info" + title_col.find("a")["href"]
+
+        discount = cols[2].text.strip()
+        if discount == "100%":
+            games.append(f"🆓 {title}\n{link}")
+
+    return games
+
+# Команда /freegames
+async def freegames_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Ищу бесплатные игры в Epic Games Store и Steam...")
+    try:
+        epic_games = get_free_epic_games()
+        steam_games = get_steam_free_games()
+        all_games = epic_games + steam_games
+
+        if all_games:
+            message = "\n\n".join(all_games)
+        else:
+            message = "❌ Сейчас нет бесплатных игр."
+    except Exception as e:
+        message = f"⚠️ Ошибка: {e}"
+    await update.message.reply_text(message)
+
+# Команда /start
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Я буду присылать уведомления о новых бесплатных играх в Epic Games Store и Steam 🎮\nНапиши /freegames чтобы проверить вручную.")
+
+# Проверка и отправка новых игр
+def check_for_new_games(app, sent_games):
+    try:
+        # Epic
+        epic_games = get_free_epic_games()
+        new_epic = [g for g in epic_games if g not in sent_games]
+
+        # Steam
+        steam_games = get_steam_free_games()
+        new_steam = [g for g in steam_games if g not in sent_games]
+
+        all_new = new_epic + new_steam
+
+        if all_new:
+            message = "🎁 Новые бесплатные игры!\n\n" + "\n\n".join(all_new)
+            asyncio.run(app.bot.send_message(chat_id=USER_ID, text=message))
+
+            # Добавляем в отправленные
+            for g in all_new:
+                sent_games.add(g)
+            save_sent_games(sent_games)
+
+    except Exception as e:
+        logging.error(f"Ошибка при проверке новых игр: {e}")
+
+# Запуск
+def main():
+    sent_games = load_sent_games()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("freegames", freegames_handler))
+
+    # Планировщик
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: check_for_new_games(app, sent_games), 'interval', hours=24)
+    scheduler.start()
+
+    print("Бот запущен...")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
